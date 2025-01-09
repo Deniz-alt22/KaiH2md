@@ -1,56 +1,73 @@
-import streamlit as st
-from openai import OpenAI
+import os
+os.environ['http_proxy'] = "http://proxy.h2.de:8080" 
+os.environ['https_proxy'] = "http://proxy.h2.de:8080" 
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+import streamlit as st
+from llama_index.core import VectorStoreIndex, Document
+from llama_index.core import Settings
+from llama_index.llms.openai_like import OpenAILike
+#from OpenAILike import OpenAILike
+import openai
+from llama_index.core import SimpleDirectoryReader
+
+
+# Lokale Definitionen
+api_base = "https://ai.h2.de/llm/v1"
+api_key = "your_api_key"
+model_name = "Llama-3.1-SauerkrautLM-70b-Instruct"
+openai.api_key = api_key
+
+# Initialisiere Sprachmodell
+Settings.llm = OpenAILike(api_base=api_base, api_key=api_key, model=model_name, max_tokens=256, temperature=0.8, system_prompt="Du bist Experte für den Studiengang AI.Engineering. Das Gespräch soll sich um die Studienordnung und den Studiengang drehen. Deine Antworten entsprechen den Fakten entsprechend der verfügbaren Dokumente - halluziniere keine Fakten.")
+
+### Initialisiere Embeddings
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core import Settings
+
+Settings.embed_model = HuggingFaceEmbedding(
+    model_name="BAAI/bge-small-en-v1.5"
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Initialisiere den Chat:
+st.header("Fragen zum Studiengang AI.Engineering 💬")
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+if "messages" not in st.session_state.keys():
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Ich beantworte dir Fragen zur Studienordnung des Studiengangs AI.Engineering an der Otto-von-Guericke Universität Magdeburg sowie an den Hochschulen Anhalt, Harz, Magdeburg-Stendal und Merseburg"}
+    ]
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Dokumente indexieren
+@st.cache_resource(show_spinner=False)
+def load_data():
+    with st.spinner(text="Ich lese die abgelegten Dokumente. Moment..."):
+        reader = SimpleDirectoryReader(input_dir="./chatdata", recursive=True)
+        docs = reader.load_data()
+        
+        index = VectorStoreIndex.from_documents(docs, show_progress=True)
+        return index
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+index = load_data()
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+# Chat-Objekt erstellen
+chat_engine = index.as_chat_engine(chat_mode="condense_question", verbose=True)
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+# Gespräch starten
+if prompt := st.chat_input("Deine Fragen:"): # Prompt for user input and save to chat history
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+for message in st.session_state.messages: # Display the prior chat messages
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+
+
+# If last message is not from assistant, generate a new response
+if st.session_state.messages[-1]["role"] != "assistant":
+    with st.chat_message("assistant"):
+        with st.spinner("Denke nach..."):
+            response = chat_engine.chat(prompt)
+            st.write(response.response)
+            message = {"role": "assistant", "content": response.response}
+            st.session_state.messages.append(message) # Add response to message history
+
